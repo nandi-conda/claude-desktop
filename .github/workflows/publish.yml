@@ -1,0 +1,74 @@
+name: Publish claude-desktop
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and upload even if this version is already on prefix.dev
+        type: boolean
+        default: false
+
+env:
+  CHANNEL: nandi-conda
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            subdir: linux-64
+          - arch: arm64
+            subdir: linux-aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve latest release
+        id: release
+        run: |
+          python3 scripts/resolve_release.py ${{ matrix.arch }} | tee -a "$GITHUB_OUTPUT"
+
+      - name: Check prefix.dev for this version
+        id: check
+        run: |
+          exists=false
+          if curl -fsSL "https://repo.prefix.dev/$CHANNEL/${{ matrix.subdir }}/repodata.json" -o repodata.json \
+            && jq -e --arg v "${{ steps.release.outputs.version }}" \
+              '[(.packages // {}), (.["packages.conda"] // {})] | add | to_entries
+               | any(.value.name == "claude-desktop" and .value.version == $v)' repodata.json >/dev/null; then
+            exists=true
+          fi
+          [ "${{ inputs.force }}" = "true" ] && exists=false
+          echo "exists=$exists" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Install rattler-build
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/rattler-build" \
+            https://github.com/prefix-dev/rattler-build/releases/latest/download/rattler-build-x86_64-unknown-linux-musl
+          chmod +x "$HOME/.local/bin/rattler-build"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          rattler-build --version
+
+      - name: Build
+        if: steps.check.outputs.exists == 'false'
+        env:
+          CD_VERSION: ${{ steps.release.outputs.version }}
+          CD_URL: ${{ steps.release.outputs.url }}
+          CD_SHA256: ${{ steps.release.outputs.sha256 }}
+        run: |
+          rattler-build build --recipe recipe/recipe.yaml \
+            --target-platform ${{ matrix.subdir }} --output-dir output
+
+      - name: Upload to prefix.dev
+        if: steps.check.outputs.exists == 'false'
+        env:
+          PREFIX_API_KEY: ${{ secrets.PREFIX_API_KEY }}
+        run: |
+          rattler-build upload prefix --channel "$CHANNEL" output/${{ matrix.subdir }}/*.conda

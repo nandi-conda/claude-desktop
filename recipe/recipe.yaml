@@ -1,0 +1,35 @@
+# CD_VERSION, CD_URL and CD_SHA256 are set by .github/workflows/publish.yml
+# from Anthropic's apt repository index (see scripts/resolve_release.py).
+context:
+  version: ${{ env.get("CD_VERSION") }}
+
+package:
+  name: claude-desktop
+  version: ${{ version }}
+
+source:
+  url: ${{ env.get("CD_URL") }}
+  sha256: ${{ env.get("CD_SHA256") }}
+  file_name: claude-desktop.deb
+
+build:
+  number: 0
+  script: build.sh
+  prefix_detection:
+    ignore: true
+  dynamic_linking:
+    binary_relocation: false
+    missing_dso_allowlist:
+      - "*"
+
+requirements:
+  build:
+    - binutils
+    - tar
+    - xz
+    - zstd
+
+about:
+  homepage: https://code.claude.com/docs/en/desktop-linux
+  summary: Claude desktop app for Linux (repackaged from Anthropic's .deb)
+  license: LicenseRef-Proprietary
