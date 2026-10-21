@@ -11,7 +11,7 @@ on:
         default: false
 
 env:
-  CHANNEL: nandi-conda
+  CHANNEL: nandi-testing
 
 jobs:
   publish:
