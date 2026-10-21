@@ -30,6 +30,7 @@ jobs:
       - name: Resolve latest release
         id: release
         run: |
+          set -o pipefail
           python3 scripts/resolve_release.py ${{ matrix.arch }} | tee -a "$GITHUB_OUTPUT"
 
       - name: Check prefix.dev for this version
