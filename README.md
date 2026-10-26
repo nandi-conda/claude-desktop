@@ -12,3 +12,8 @@ builds `recipe/` with rattler-build and uploads it using the `PREFIX_API_KEY` se
 ```
 pixi global install -c https://prefix.dev/nandi-testing claude-desktop
 ```
+
+The package ships a [menuinst](https://conda.github.io/menuinst/) shortcut in
+`$PREFIX/Menu/claude-desktop.json`, so conda and `pixi global` add Claude to the
+desktop app launcher on install. It is generated at build time from the `.desktop`
+file inside the `.deb` (see `recipe/menu.jq`).
