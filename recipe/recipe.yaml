@@ -13,7 +13,8 @@ source:
   file_name: claude-desktop.deb
 
 build:
-  number: 0
+  # Bump when the recipe changes without a new upstream version; reset to 0 on a new version.
+  number: 1
   script: build.sh
   prefix_detection:
     ignore: true

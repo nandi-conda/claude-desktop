@@ -37,10 +37,11 @@ jobs:
         id: check
         run: |
           exists=false
+          build=$(sed -n 's/^  number: *//p' recipe/recipe.yaml)
           if curl -fsSL "https://repo.prefix.dev/$CHANNEL/${{ matrix.subdir }}/repodata.json" -o repodata.json \
-            && jq -e --arg v "${{ steps.release.outputs.version }}" \
+            && jq -e --arg v "${{ steps.release.outputs.version }}" --argjson b "$build" \
               '[(.packages // {}), (.["packages.conda"] // {})] | add | to_entries
-               | any(.value.name == "claude-desktop" and .value.version == $v)' repodata.json >/dev/null; then
+               | any(.value.name == "claude-desktop" and .value.version == $v and .value.build_number == $b)' repodata.json >/dev/null; then
             exists=true
           fi
           [ "${{ inputs.force }}" = "true" ] && exists=false
