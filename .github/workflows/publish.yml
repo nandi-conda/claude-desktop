@@ -14,7 +14,31 @@ env:
   CHANNEL: nandi-testing
 
 jobs:
-  publish:
+  # Fail in seconds on a missing or rejected PREFIX_API_KEY instead of after the build.
+  check-auth:
+    runs-on: depot-ubuntu-latest
+    steps:
+      - name: Check prefix.dev API key
+        env:
+          PREFIX_API_KEY: ${{ secrets.PREFIX_API_KEY }}
+        run: |
+          if [ -z "$PREFIX_API_KEY" ]; then
+            echo "::error::PREFIX_API_KEY is empty or not available to this workflow"
+            exit 1
+          fi
+          status=$(curl -sS -o viewer.json -w '%{http_code}' https://prefix.dev/api/graphql \
+            -H "Authorization: Bearer $PREFIX_API_KEY" -H 'Content-Type: application/json' \
+            --data '{"query": "{ viewer { login } }"}')
+          login=$(jq -r '.data.viewer.login // empty' viewer.json 2>/dev/null || true)
+          if [ "$status" != 200 ] || [ -z "$login" ]; then
+            echo "::error::prefix.dev rejected PREFIX_API_KEY (HTTP $status). Regenerate a read/write key with upload access to $CHANNEL."
+            cat viewer.json; echo
+            exit 1
+          fi
+          echo "PREFIX_API_KEY authenticates as $login"
+
+  build:
+    needs: check-auth
     runs-on: depot-ubuntu-latest
     strategy:
       fail-fast: false
@@ -68,9 +92,41 @@ jobs:
           rattler-build build --recipe recipe/recipe.yaml \
             --target-platform ${{ matrix.subdir }} --output-dir output
 
-      - name: Upload to prefix.dev
+      # Kept as an artifact so a failed upload can be retried with
+      # "Re-run failed jobs" without rebuilding.
+      - name: Save package
         if: steps.check.outputs.exists == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: conda-${{ matrix.subdir }}
+          path: output/${{ matrix.subdir }}/*.conda
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: depot-ubuntu-latest
+    steps:
+      - name: Fetch built packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: conda-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload to prefix.dev
         env:
           PREFIX_API_KEY: ${{ secrets.PREFIX_API_KEY }}
         run: |
-          rattler-build upload prefix --channel "$CHANNEL" output/${{ matrix.subdir }}/*.conda
+          shopt -s nullglob
+          pkgs=(dist/*.conda)
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "Nothing new to upload"
+            exit 0
+          fi
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/rattler-build" \
+            https://github.com/prefix-dev/rattler-build/releases/latest/download/rattler-build-x86_64-unknown-linux-musl
+          chmod +x "$HOME/.local/bin/rattler-build"
+          "$HOME/.local/bin/rattler-build" upload prefix --channel "$CHANNEL" "${pkgs[@]}"
