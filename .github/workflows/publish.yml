@@ -129,4 +129,4 @@ jobs:
           curl -fsSL -o "$HOME/.local/bin/rattler-build" \
             https://github.com/prefix-dev/rattler-build/releases/latest/download/rattler-build-x86_64-unknown-linux-musl
           chmod +x "$HOME/.local/bin/rattler-build"
-          "$HOME/.local/bin/rattler-build" upload prefix --channel "$CHANNEL" "${pkgs[@]}"
+          "$HOME/.local/bin/rattler-build" upload prefix --channel "$CHANNEL" --skip-existing "${pkgs[@]}"
