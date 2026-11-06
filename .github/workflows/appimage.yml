@@ -99,6 +99,8 @@ jobs:
           npm install --silent --prefix "$RUNNER_TEMP/node" @electron/asar@3.4.1
           echo "NODE_PATH=$RUNNER_TEMP/node/node_modules" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/bin"
+          # "continuous" releases briefly lose their assets while being rebuilt.
+          curl() { command curl --retry 6 --retry-delay 30 --retry-all-errors "$@"; }
           curl -fsSL -o "$RUNNER_TEMP/bin/appimagetool" \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           curl -fsSL -o "$RUNNER_TEMP/bin/appimageupdatetool.AppImage" \
