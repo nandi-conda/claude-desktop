@@ -11,7 +11,8 @@ Depot CLI but no curl or Docker. Steps:
    release, delete them locally (the runner's disk is small).
 4. Publish the release; `latest` then serves the new files to the updater.
 
-Needs DEPOT_TOKEN and DEPOT_PROJECT_ID (repo or user secrets). FORGE_API and
+Needs DEPOT_TOKEN (repo or user secret). DEPOT_PROJECT_ID is optional: without it the
+Depot project named claude-desktop is used, created if missing. FORGE_API and
 FORGE_TOKEN come from the job.
 """
 import hashlib
@@ -93,11 +94,51 @@ def upload(tag, path):
     say(f"  done, sha256 {digest}")
 
 
+DEPOT_PROJECT = "claude-desktop"  # used when DEPOT_PROJECT_ID isn't set
+
+
+def depot_project():
+    """DEPOT_PROJECT_ID if set; else find (or create) the Depot project by name.
+
+    With a Depot user token as a user secret, the repo needs no secrets of its own."""
+    if os.environ.get("DEPOT_PROJECT_ID"):
+        return os.environ["DEPOT_PROJECT_ID"]
+
+    def projects():
+        r = subprocess.run(["depot", "projects", "list", "--output", "json"], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            sys.exit(f"DEPOT_PROJECT_ID isn't set and `depot projects list` failed: {r.stderr.strip()[-500:]}")
+        data = json.loads(r.stdout or "[]")
+        if isinstance(data, dict):
+            data = data.get("projects") or data.get("Projects") or []
+        out = {}
+        for p in data:
+            low = {k.lower().replace("_", ""): v for k, v in p.items()} if isinstance(p, dict) else {}
+            if low.get("projectid") or low.get("id"):
+                out[str(low.get("name") or "")] = str(low.get("projectid") or low.get("id"))
+        return out
+
+    found = projects().get(DEPOT_PROJECT)
+    if not found:
+        say(f"Creating Depot project {DEPOT_PROJECT}")
+        r = subprocess.run(["depot", "projects", "create", DEPOT_PROJECT], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            sys.exit(f"`depot projects create {DEPOT_PROJECT}` failed: {(r.stderr or r.stdout).strip()[-500:]}. "
+                     "Set DEPOT_PROJECT_ID on this repo instead.")
+        found = projects().get(DEPOT_PROJECT)
+        if not found:
+            sys.exit(f"Created Depot project {DEPOT_PROJECT} but can't find it; set DEPOT_PROJECT_ID instead.")
+    say(f"Depot project {DEPOT_PROJECT}: {found}")
+    return found
+
+
 def main():
-    for name in ("DEPOT_TOKEN", "DEPOT_PROJECT_ID"):
-        if not os.environ.get(name):
-            sys.exit(f"{name} isn't set. In a fileapi checkout run `just depot-token claude-desktop` "
-                     "(or set DEPOT_TOKEN as a user secret and DEPOT_PROJECT_ID on this repo).")
+    if not os.environ.get("DEPOT_TOKEN"):
+        sys.exit("DEPOT_TOKEN isn't set. In a fileapi checkout run `just depot-user-token claude-desktop` "
+                 "(or set DEPOT_TOKEN as a user or repo secret).")
+    project = depot_project()
 
     info = {deb: resolve(deb) for _, deb in ARCHES}
     for deb, i in info.items():
@@ -134,7 +175,7 @@ Built from {os.environ.get('FORGE_SHA', '')[:12]}.
     dist = ROOT / "dist"
     for arch, deb in arches:
         shutil.rmtree(dist, ignore_errors=True)
-        cmd = ["depot", "build", "--project", os.environ["DEPOT_PROJECT_ID"], "--progress", "plain",
+        cmd = ["depot", "build", "--project", project, "--progress", "plain",
                "--platform", "linux/amd64", "-f", "appimage/Dockerfile",
                "--build-arg", f"ARCH={arch}", "--build-arg", f"VERSION={version}",
                "--build-arg", f"DEB_URL={info[deb]['url']}", "--build-arg", f"DEB_SHA256={info[deb]['sha256']}",

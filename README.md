@@ -26,8 +26,9 @@ to `main`: it resolves the newest `.deb` for amd64 and arm64, builds `appimage/D
 each arch, and publishes `Claude-Desktop-x86_64.AppImage` and `Claude-Desktop-aarch64.AppImage` (each with
 a `.zsync`) as release `v<version>` on the forge. A version that is already released is skipped; bump
 `appimage/REVISION` to republish it, or press **Run now** on the forge's Deploys tab to pick up a new
-upstream version without a push. The job needs the `DEPOT_TOKEN` and `DEPOT_PROJECT_ID` secrets
-(`just depot-token claude-desktop` in a fileapi checkout sets both).
+upstream version without a push. The job needs a `DEPOT_TOKEN` secret (a user secret
+from `just depot-user-token` works). `DEPOT_PROJECT_ID` is optional: without it the job uses the Depot
+project named `claude-desktop`, creating it if needed.
 
 ```
 curl -fLO https://fileapi.fastapicloud.dev/api/forge/repos/nandi.uk/claude-desktop/releases/latest/assets/Claude-Desktop-x86_64.AppImage
