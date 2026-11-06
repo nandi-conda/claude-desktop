@@ -35,8 +35,14 @@ const enabled =
   fs.existsSync(TOOL) &&
   process.env.CLAUDE_APPIMAGE_DISABLE_UPDATES !== '1';
 
+// Straight to fd 2: the app redirects console and process.stderr to its own logger.
 function log(...args) {
-  console.log('[appimage-updater]', ...args);
+  const text = args.map((a) => (typeof a === 'string' ? a : require('util').inspect(a))).join(' ');
+  try {
+    fs.writeSync(2, `[appimage-updater] ${text}\n`);
+  } catch (_) {
+    /* no stderr */
+  }
 }
 
 function runTool(args) {
@@ -198,9 +204,25 @@ function hasItem(menu) {
 
 const plain = (label) => String(label || '').replace(/&/g, '').trim().toLowerCase();
 
+// The app ships its own "Check for Updates…" (it only says to use apt on
+// Linux). Point it at the AppImage updater instead of adding a second one.
+function takeOverExisting(menu, depth = 0) {
+  let found = false;
+  for (const item of menu.items) {
+    if (item.id !== ITEM_ID && /^check for updates/.test(plain(item.label))) {
+      item.click = () => checkForUpdates({ interactive: true });
+      item.enabled = true;
+      item.visible = true;
+      found = true;
+    }
+    if (item.submenu && depth < 3 && takeOverExisting(item.submenu, depth + 1)) found = true;
+  }
+  return found;
+}
+
 // Application menu: into Help (or the first submenu) at the end.
 function injectAppMenu(menu) {
-  if (!menu || hasItem(menu)) return;
+  if (!menu || hasItem(menu) || takeOverExisting(menu)) return;
   const items = menu.items;
   const target =
     items.find((i) => i.submenu && (i.role === 'help' || plain(i.label) === 'help')) ||
@@ -212,8 +234,10 @@ function injectAppMenu(menu) {
 
 // Tray menu: just above Quit, or at the end.
 function injectTrayMenu(menu) {
-  if (!menu || hasItem(menu)) return;
-  const idx = menu.items.findIndex((i) => i.role === 'quit' || /^(quit|exit)\b/.test(plain(i.label)));
+  if (!menu || hasItem(menu) || takeOverExisting(menu)) return;
+  let idx = menu.items.findIndex((i) => i.role === 'quit' || /^(quit|exit)\b/.test(plain(i.label)));
+  // Keep Quit in its own group: go above the separator before it.
+  if (idx > 0 && menu.items[idx - 1].type === 'separator') idx -= 1;
   if (idx >= 0) menu.insert(idx, makeItem());
   else menu.append(makeItem());
 }

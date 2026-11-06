@@ -108,7 +108,8 @@ icon="$( (find "$appdir/usr/share/icons" "$appdir/usr/share/pixmaps" "$edir" \
   \( -name "$icon_base.png" -o -name "$icon_base" \) -type f 2>/dev/null || true) | xargs -r ls -S | head -n1)"
 [ -n "$icon" ] || { echo "::error::icon $icon_name not found"; exit 1; }
 cp "$icon" "$appdir/$icon_base.png"
-ln -sfn "$icon_base.png" "$appdir/.DirIcon"
+cp "$icon" "$appdir/.DirIcon"
+file "$icon"
 sed -i -E \
   -e "s|^Icon=.*|Icon=$icon_base|" \
   -e 's|^Exec=[^ ]+|Exec=claude-desktop|' \
