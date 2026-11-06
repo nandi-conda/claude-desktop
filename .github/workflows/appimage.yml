@@ -1,0 +1,174 @@
+name: AppImage
+
+on:
+  schedule:
+    - cron: "47 6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - appimage/**
+      - scripts/resolve_release.py
+      - .github/workflows/appimage.yml
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and replace the release even if it already exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appimage
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: depot-ubuntu-latest
+    outputs:
+      version: ${{ steps.r.outputs.version }}
+      tag: ${{ steps.r.outputs.tag }}
+      skip: ${{ steps.r.outputs.skip }}
+      matrix: ${{ steps.r.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve latest release and decide what to build
+        id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          python3 scripts/resolve_release.py amd64 > amd64.env
+          python3 scripts/resolve_release.py arm64 > arm64.env
+          cat amd64.env arm64.env
+          version=$(sed -n 's/^version=//p' amd64.env)
+          # Bump appimage/REVISION to republish the same upstream version after
+          # an AppImage-only change; reset it to 0 when it's convenient.
+          rev=$(tr -d '[:space:]' < appimage/REVISION)
+          tag="v$version"
+          [ "$rev" != 0 ] && tag="$tag-$rev"
+
+          matrix=$(python3 - <<'EOF'
+          import json
+          def load(p):
+              return dict(l.rstrip("\n").split("=", 1) for l in open(p) if "=" in l)
+          a, b = load("amd64.env"), load("arm64.env")
+          inc = [dict(arch="x86_64", deb_arch="amd64", url=a["url"], sha256=a["sha256"])]
+          if b["version"] == a["version"]:
+              inc.append(dict(arch="aarch64", deb_arch="arm64", url=b["url"], sha256=b["sha256"]))
+          else:
+              print(f"::warning::arm64 is at {b['version']}, amd64 at {a['version']}; building x86_64 only", flush=True, file=__import__("sys").stderr)
+          print(json.dumps({"include": inc}))
+          EOF
+          )
+
+          skip=false
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            skip=true
+          fi
+          [ "$FORCE" = true ] && skip=false
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "skip=$skip"
+            echo "matrix=$matrix"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: depot-ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsync squashfs-tools file >/dev/null
+          npm install --silent --prefix "$RUNNER_TEMP/node" @electron/asar@3.4.1
+          echo "NODE_PATH=$RUNNER_TEMP/node/node_modules" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          curl -fsSL -o "$RUNNER_TEMP/bin/appimageupdatetool.AppImage" \
+            "https://github.com/AppImageCommunity/AppImageUpdate/releases/download/continuous/appimageupdatetool-${{ matrix.arch }}.AppImage"
+          chmod +x "$RUNNER_TEMP"/bin/*
+          echo "APPIMAGETOOL=$RUNNER_TEMP/bin/appimagetool" >> "$GITHUB_ENV"
+          echo "UPDATETOOL=$RUNNER_TEMP/bin/appimageupdatetool.AppImage" >> "$GITHUB_ENV"
+
+      - name: Download .deb
+        run: |
+          set -euo pipefail
+          curl -fsSL -o claude-desktop.deb "${{ matrix.url }}"
+          echo "${{ matrix.sha256 }}  claude-desktop.deb" | sha256sum -c -
+
+      - name: Build AppImage
+        run: bash appimage/build.sh claude-desktop.deb ${{ matrix.arch }} "${{ needs.resolve.outputs.version }}" dist
+
+      - name: Smoke test
+        if: matrix.arch == 'x86_64'
+        run: |
+          set -euo pipefail
+          f=dist/Claude-Desktop-x86_64.AppImage
+          # Embedded update info must be readable by appimageupdatetool.
+          APPIMAGE_EXTRACT_AND_RUN=1 "$UPDATETOOL" --describe "$f" 2>&1 | tee describe.txt
+          grep -q 'gh-releases-zsync' describe.txt
+          "$f" --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/lib/appimageupdatetool/AppRun
+          rm -rf squashfs-root
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    needs: [resolve, build]
+    runs-on: depot-ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: appimage-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+            exit 0
+          fi
+          cat > notes.md <<EOF
+          Claude Desktop $VERSION for Linux, repackaged as an AppImage from Anthropic's .deb.
+
+          Download \`Claude-Desktop-x86_64.AppImage\` (or \`-aarch64\`), \`chmod +x\` it and run it.
+          It updates itself: use **Check for Updates…** in the Help or tray menu, accept the
+          prompt shown shortly after start-up, or run it with \`--appimage-update\`.
+          Updates are zsync deltas from the latest release of this repository.
+          EOF
+          # Draft first so "latest" never points at a release with missing assets.
+          gh release create "$TAG" dist/* --draft --title "Claude Desktop $VERSION" \
+            --notes-file notes.md --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"

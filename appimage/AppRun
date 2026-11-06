@@ -1,0 +1,32 @@
+#!/bin/sh
+# AppImage entry point for Claude Desktop. build.sh replaces @ENTRY@ with the
+# path (relative to the AppDir) of the upstream launcher or Electron binary.
+HERE="$(dirname "$(readlink -f "$0")")"
+export APPDIR="${APPDIR:-$HERE}"
+
+# Terminal-side update: ./Claude-Desktop-x86_64.AppImage --appimage-update
+if [ "${1:-}" = "--appimage-update" ]; then
+  if [ -z "${APPIMAGE:-}" ]; then
+    echo "Not running from an AppImage file; nothing to update." >&2
+    exit 1
+  fi
+  target="$APPIMAGE"
+  unset APPIMAGE APPDIR ARGV0 OWD
+  exec "$HERE/usr/lib/appimageupdatetool/AppRun" -r "$target"
+fi
+
+# chrome-sandbox can't be setuid inside an AppImage, so build.sh removes it and
+# Chromium uses its user-namespace sandbox instead. Where unprivileged user
+# namespaces are blocked (Ubuntu 23.10+ AppArmor default, some hardened
+# kernels) that sandbox can't start either, so fall back to --no-sandbox.
+no_sandbox=0
+[ "${CLAUDE_APPIMAGE_NO_SANDBOX:-}" = 1 ] && no_sandbox=1
+[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] && no_sandbox=1
+[ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)" = 0 ] && no_sandbox=1
+[ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null)" = 0 ] && no_sandbox=1
+[ "$(id -u)" = 0 ] && no_sandbox=1
+if [ "$no_sandbox" = 1 ]; then
+  set -- --no-sandbox "$@"
+fi
+
+exec "$APPDIR/@ENTRY@" "$@"
