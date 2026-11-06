@@ -11,8 +11,29 @@ if [ "${1:-}" = "--appimage-update" ]; then
     exit 1
   fi
   target="$APPIMAGE"
-  unset APPIMAGE APPDIR ARGV0 OWD
-  exec "$HERE/usr/lib/appimageupdatetool/AppRun" -r "$target"
+  (unset APPIMAGE APPDIR ARGV0 OWD; "$HERE/usr/lib/appimageupdatetool/AppRun" -r "$target") && exit 0
+  rm -f "$target.part"
+  # zsync needs multi-range requests, which GitHub's release CDN may refuse.
+  # Fall back to downloading the whole file, checked against the .zsync SHA-1.
+  echo "Delta update failed; downloading the full AppImage instead." >&2
+  base="https://github.com/@REPO@/releases/latest/download/@FILE@"
+  set -e
+  zs="$(mktemp)"
+  curl -fsSL -o "$zs" "$base.zsync"
+  want="$(head -c 4096 "$zs" | tr -d '\r' | sed -n 's/^SHA-1: *//p' | head -n1)"
+  rm -f "$zs"
+  [ -n "$want" ] || { echo "Could not read $base.zsync" >&2; exit 1; }
+  curl -fL --progress-bar -o "$target.download" "$base"
+  got="$(sha1sum "$target.download" | cut -d' ' -f1)"
+  if [ "$got" != "$want" ]; then
+    rm -f "$target.download"
+    echo "Checksum mismatch (expected $want, got $got)" >&2
+    exit 1
+  fi
+  chmod --reference="$target" "$target.download" 2>/dev/null || chmod 755 "$target.download"
+  mv -f "$target.download" "$target"
+  echo "Updated $target" >&2
+  exit 0
 fi
 
 # chrome-sandbox can't be setuid inside an AppImage, so build.sh removes it and

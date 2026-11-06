@@ -5,7 +5,8 @@
 // It adds "Check for Updates…" to the app menu and the tray menu, checks once
 // shortly after start-up (and every few hours), and updates the AppImage in
 // place with the bundled appimageupdatetool (zsync delta download from the
-// GitHub release). Then it loads the app's real entry point unchanged.
+// GitHub release), falling back to a full download if the delta fails. Then
+// it loads the app's real entry point unchanged.
 //
 // Environment:
 //   CLAUDE_APPIMAGE_DISABLE_UPDATES=1   no menu items, no checks
@@ -112,21 +113,79 @@ async function promptRestart() {
   setTimeout(() => app.exit(0), 3000).unref();
 }
 
+// Plain HTTPS download of the whole AppImage from the latest release, checked
+// against the SHA-1 in its .zsync file. Used when the zsync delta download
+// fails (GitHub's release CDN rejects the multi-range requests zsync makes).
+async function fullDownload() {
+  const { net } = electron;
+  const repo = cfg.repo;
+  const file = cfg.file;
+  if (!repo || !file) throw new Error('no release repository configured');
+  const headers = { 'User-Agent': 'claude-desktop-appimage-updater', Accept: 'application/vnd.github+json' };
+  const rel = await net.fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers });
+  if (!rel.ok) throw new Error(`GitHub API: HTTP ${rel.status}`);
+  const assets = (await rel.json()).assets || [];
+  const asset = assets.find((a) => a.name === file);
+  const zsync = assets.find((a) => a.name === `${file}.zsync`);
+  if (!asset || !zsync) throw new Error(`${file} or its .zsync is missing from the latest release`);
+
+  const zs = await net.fetch(zsync.browser_download_url, { headers: { 'User-Agent': headers['User-Agent'] } });
+  if (!zs.ok) throw new Error(`${zsync.name}: HTTP ${zs.status}`);
+  // The header is text up to the first blank line; the rest is binary checksums.
+  const head = Buffer.from(await zs.arrayBuffer()).subarray(0, 4096).toString('latin1');
+  const want = (/^SHA-1:\s*([0-9a-f]{40})/im.exec(head) || [])[1];
+  if (!want) throw new Error(`no SHA-1 in ${zsync.name}`);
+
+  const tmp = `${APPIMAGE}.download`;
+  const res = await net.fetch(asset.browser_download_url, { headers: { 'User-Agent': headers['User-Agent'] } });
+  if (!res.ok || !res.body) throw new Error(`${file}: HTTP ${res.status}`);
+  const hash = require('crypto').createHash('sha1');
+  const fd = fs.openSync(tmp, 'w', 0o755);
+  try {
+    for await (const chunk of res.body) {
+      const buf = Buffer.from(chunk);
+      hash.update(buf);
+      fs.writeSync(fd, buf);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  const got = hash.digest('hex');
+  if (got !== want.toLowerCase()) {
+    fs.rmSync(tmp, { force: true });
+    throw new Error(`checksum mismatch (expected ${want}, got ${got})`);
+  }
+  fs.chmodSync(tmp, fs.statSync(APPIMAGE).mode & 0o7777 || 0o755);
+  // rename() swaps the file atomically; the running copy keeps its old inode.
+  fs.renameSync(tmp, APPIMAGE);
+  return APPIMAGE;
+}
+
 async function installUpdate() {
   notify('Downloading the Claude update…');
   const { code, out } = await runTool(['-r', APPIMAGE]);
-  log('update exited with', code, '\n' + tail(out, 40));
-  if (code !== 0) {
-    await box({
-      type: 'error',
-      message: 'Update failed',
-      detail: tail(out) || `appimageupdatetool exited with code ${code}`,
-      buttons: ['OK'],
-    });
-    return;
+  log('zsync update exited with', code, '\n' + tail(out, 40));
+  if (code === 0) {
+    const m = /(?:New file created|Updated existing file):?\s*(.+)\s*$/m.exec(out);
+    installedPath = m && fs.existsSync(m[1].trim()) ? m[1].trim() : APPIMAGE;
+  } else {
+    fs.rmSync(`${APPIMAGE}.part`, { force: true });
+    try {
+      log('falling back to a full download');
+      installedPath = await fullDownload();
+      log('full download installed', installedPath);
+    } catch (err) {
+      log('full download failed:', err);
+      fs.rmSync(`${APPIMAGE}.download`, { force: true });
+      await box({
+        type: 'error',
+        message: 'Update failed',
+        detail: `${err && err.message ? err.message : err}\n\n${tail(out, 6)}`,
+        buttons: ['OK'],
+      });
+      return;
+    }
   }
-  const m = /(?:New file created|Updated existing file):?\s*(.+)\s*$/m.exec(out);
-  installedPath = m && fs.existsSync(m[1].trim()) ? m[1].trim() : APPIMAGE;
   await promptRestart();
 }
 
@@ -169,7 +228,7 @@ async function checkForUpdates({ interactive }) {
       type: 'info',
       message: 'A new version of Claude is available',
       detail:
-        'The update downloads in the background (only the changed parts of the AppImage) and takes effect after a restart.',
+        'Claude downloads the update in the background. It takes effect after a restart.',
       buttons: ['Update', 'Later'],
       defaultId: 0,
       cancelId: 1,

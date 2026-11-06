@@ -30,11 +30,14 @@ chmod +x Claude-Desktop-x86_64.AppImage
 ./Claude-Desktop-x86_64.AppImage
 ```
 
-Updates come from the latest release as zsync deltas (`gh-releases-zsync` update
-information is embedded in the AppImage, so AppImageLauncher, Gear Lever and
-`appimageupdatetool` work too). Inside the app:
+Updates come from the latest release. `gh-releases-zsync` update information is
+embedded, so AppImageLauncher, Gear Lever and `appimageupdatetool` can update it
+too. zsync deltas need multi-range HTTP requests, which GitHub's release CDN
+currently refuses, so the built-in updater falls back to downloading the whole
+AppImage and checks it against the SHA-1 in the `.zsync` file. Inside the app:
 
-- **Check for Updates…** is added to the Help menu and the tray menu.
+- **Help › Check for Updates…** (the app's own item, which on Linux otherwise
+  just points at apt) and a **Check for Updates…** tray item run the AppImage updater.
 - About 30 seconds after start-up, and every 6 hours, the app checks and offers
   to update. The new AppImage replaces the old file in place and the app offers
   to restart into it.

@@ -78,7 +78,7 @@ echo "AppRun entry: $entry"
 rm -f "$edir/chrome-sandbox"
 
 echo "::group::Add in-app updater to app.asar"
-node "$here/repack-asar.cjs" "$asar" "$here/updater.cjs" "$version"
+node "$here/repack-asar.cjs" "$asar" "$here/updater.cjs" "$version" "$repo" "$file"
 echo "::endgroup::"
 
 echo "::group::Bundle appimageupdatetool"
@@ -104,11 +104,11 @@ cp "$desktop_src" "$desktop"
 icon_name="$(sed -n 's/^Icon=//p' "$desktop" | head -n1)"
 icon_base="${icon_name##*/}"
 icon_base="${icon_base%.png}"
-icon="$( (find "$appdir/usr/share/icons" "$appdir/usr/share/pixmaps" "$edir" \
-  \( -name "$icon_base.png" -o -name "$icon_base" \) -type f 2>/dev/null || true) | xargs -r ls -S | head -n1)"
-[ -n "$icon" ] || { echo "::error::icon $icon_name not found"; exit 1; }
+# Largest PNG with the icon's name (not the Electron binary, which shares it).
+icon="$(find "$appdir/usr/share/icons" "$appdir/usr/share/pixmaps" -type f -name "$icon_base.png" 2>/dev/null \
+  | xargs -r ls -S | while read -r f; do file -b "$f" | grep -q '^PNG' && { echo "$f"; break; }; done || true)"
+[ -n "$icon" ] || { echo "::error::no PNG icon named $icon_base"; exit 1; }
 cp "$icon" "$appdir/$icon_base.png"
-cp "$icon" "$appdir/.DirIcon"
 file "$icon"
 sed -i -E \
   -e "s|^Icon=.*|Icon=$icon_base|" \
@@ -119,7 +119,7 @@ sed -i "0,/^\[Desktop Entry\]/s//[Desktop Entry]\nX-AppImage-Version=$version/" 
 cat "$desktop"
 echo "::endgroup::"
 
-sed "s|@ENTRY@|$entry|" "$here/AppRun" > "$appdir/AppRun"
+sed -e "s|@ENTRY@|$entry|" -e "s|@REPO@|$repo|" -e "s|@FILE@|$file|" "$here/AppRun" > "$appdir/AppRun"
 chmod +x "$appdir/AppRun"
 
 echo "::group::appimagetool"
