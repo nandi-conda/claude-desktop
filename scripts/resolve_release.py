@@ -5,6 +5,7 @@ highest Version in that repository's Packages index. Prints KEY=VALUE lines
 suitable for $GITHUB_OUTPUT.
 """
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -20,11 +21,65 @@ def fetch(url):
         return r.read().decode()
 
 
+def _order(c):
+    # dpkg: ~ sorts before everything (even the end), letters before non-letters.
+    if c == "~":
+        return -1
+    if c.isdigit():
+        return 0
+    if c.isalpha():
+        return ord(c)
+    return ord(c) + 256
+
+
+def _cmp_part(a, b):
+    while a or b:
+        # non-digit prefix
+        i = 0
+        while i < len(a) and not a[i].isdigit():
+            i += 1
+        j = 0
+        while j < len(b) and not b[j].isdigit():
+            j += 1
+        pa, pb = a[:i], b[:j]
+        a, b = a[i:], b[j:]
+        for k in range(max(len(pa), len(pb))):
+            ca = _order(pa[k]) if k < len(pa) else 0
+            cb = _order(pb[k]) if k < len(pb) else 0
+            if ca != cb:
+                return -1 if ca < cb else 1
+        # digit prefix
+        i = 0
+        while i < len(a) and a[i].isdigit():
+            i += 1
+        j = 0
+        while j < len(b) and b[j].isdigit():
+            j += 1
+        na, nb = int(a[:i] or 0), int(b[:j] or 0)
+        a, b = a[i:], b[j:]
+        if na != nb:
+            return -1 if na < nb else 1
+    return 0
+
+
+def _split(v):
+    epoch, _, rest = v.rpartition(":") if ":" in v else ("0", "", v)
+    upstream, _, revision = rest.rpartition("-") if "-" in rest else (rest, "", "")
+    return int(epoch or 0), upstream, revision
+
+
 def dpkg_cmp(a, b):
     if a == b:
         return 0
-    lt = subprocess.run(["dpkg", "--compare-versions", a, "lt", b]).returncode == 0
-    return -1 if lt else 1
+    if shutil.which("dpkg"):
+        lt = subprocess.run(["dpkg", "--compare-versions", a, "lt", b]).returncode == 0
+        return -1 if lt else 1
+    # No dpkg (the fileapi forge runner): Debian's algorithm in Python.
+    ea, ua, ra = _split(a)
+    eb, ub, rb = _split(b)
+    if ea != eb:
+        return -1 if ea < eb else 1
+    return _cmp_part(ua, ub) or _cmp_part(ra, rb)
 
 
 def main(arch):

@@ -1,5 +1,5 @@
 'use strict';
-// Usage: node repack-asar.cjs <app.asar> <updater.cjs> <version> <owner/repo> <AppImage file name>
+// Usage: node repack-asar.cjs <app.asar> <updater.cjs> <version> <zsync URL>
 // Needs @electron/asar 3.x on NODE_PATH.
 //
 // Unpacks app.asar, adds updater.cjs as the new "main" (remembering the
@@ -12,9 +12,9 @@ const path = require('path');
 const asar = require('@electron/asar');
 
 async function main() {
-  const [archive, updater, version, repo, file] = process.argv.slice(2);
-  if (!archive || !updater || !version || !repo || !file) {
-    console.error('usage: repack-asar.cjs <app.asar> <updater.cjs> <version> <owner/repo> <file>');
+  const [archive, updater, version, zsyncUrl] = process.argv.slice(2);
+  if (!archive || !updater || !version || !zsyncUrl) {
+    console.error('usage: repack-asar.cjs <app.asar> <updater.cjs> <version> <zsync URL>');
     process.exit(2);
   }
   const unpackedDir = archive + '.unpacked';
@@ -40,7 +40,7 @@ async function main() {
   const originalMain = pkg.main || 'index.js';
   console.log(`package ${pkg.name}@${pkg.version}, main=${originalMain}, type=${pkg.type || 'commonjs'}`);
   console.log(`${unpacked.length} unpacked file(s)`);
-  pkg.appimageUpdater = { originalMain, version, repo, file };
+  pkg.appimageUpdater = { originalMain, version, zsyncUrl };
   pkg.main = 'appimage-updater.cjs';
   fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
   fs.copyFileSync(updater, path.join(src, 'appimage-updater.cjs'));

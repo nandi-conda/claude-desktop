@@ -1,0 +1,10 @@
+# fileapi forge CI (https://fileapi.fastapicloud.dev/forge/#nandi.uk/claude-desktop).
+# On every push to main: build the AppImages on depot (remote BuildKit) and publish
+# them as a release, unless that version is already released. See ci/appimage.py.
+# Needs the DEPOT_TOKEN and DEPOT_PROJECT_ID secrets (`just depot-token claude-desktop`
+# in a fileapi checkout). "Run now" on the Deploys tab re-checks for a new upstream version.
+[[job]]
+name = "appimage"
+branches = ["main"]
+timeout = 3600
+run = "python3 ci/appimage.py  # builds on depot"

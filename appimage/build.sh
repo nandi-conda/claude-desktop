@@ -4,8 +4,9 @@
 # Usage: appimage/build.sh <claude-desktop.deb> <x86_64|aarch64> <version> <outdir>
 #
 # Needs: APPIMAGETOOL (appimagetool AppImage for the build host),
-#        UPDATETOOL (appimageupdatetool AppImage for the *target* arch),
-#        NODE_PATH with @electron/asar 3.x, plus zsyncmake, unsquashfs, file.
+#        UPDATE_BASE (URL that serves the latest release's files, no trailing slash),
+#        NODE_PATH with @electron/asar 3.x, plus zsyncmake and file.
+# appimage/Dockerfile sets all of this up; .forge/jobs.toml builds it on Depot.
 set -euo pipefail
 
 deb="$(realpath "$1")"
@@ -13,14 +14,14 @@ arch="$2"
 version="$3"
 out="$(realpath -m "$4")"
 here="$(cd "$(dirname "$0")" && pwd)"
-: "${APPIMAGETOOL:?}" "${UPDATETOOL:?}"
+: "${APPIMAGETOOL:?}" "${UPDATE_BASE:?}"
 
-repo="${GITHUB_REPOSITORY:-nandi-conda/claude-desktop}"
 name=Claude-Desktop
 file="$name-$arch.AppImage"
 # Fixed file name per arch: an update replaces the file in place, so menu
 # entries and the in-app restart keep pointing at the right path.
-update_info="gh-releases-zsync|${repo%%/*}|${repo#*/}|latest|$file.zsync"
+zsync_url="$UPDATE_BASE/$file.zsync"
+update_info="zsync|$zsync_url"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -78,23 +79,7 @@ echo "AppRun entry: $entry"
 rm -f "$edir/chrome-sandbox"
 
 echo "::group::Add in-app updater to app.asar"
-node "$here/repack-asar.cjs" "$asar" "$here/updater.cjs" "$version" "$repo" "$file"
-echo "::endgroup::"
-
-echo "::group::Bundle appimageupdatetool"
-# The tool is an AppImage itself; unpack it so it runs without FUSE and can be
-# built for another arch. Its squashfs starts where the ELF runtime ends.
-offset="$(python3 -c '
-import struct, sys
-h = open(sys.argv[1], "rb").read(64)
-assert h[:4] == b"\x7fELF" and h[4] == 2, "not a 64-bit ELF"
-shoff, = struct.unpack_from("<Q", h, 0x28)
-shentsize, shnum = struct.unpack_from("<HH", h, 0x3A)
-print(shoff + shentsize * shnum)' "$UPDATETOOL")"
-mkdir -p "$appdir/usr/lib"
-unsquashfs -q -n -o "$offset" -d "$appdir/usr/lib/appimageupdatetool" "$UPDATETOOL"
-[ -e "$appdir/usr/lib/appimageupdatetool/AppRun" ] || { echo "::error::appimageupdatetool has no AppRun"; exit 1; }
-ls -la "$appdir/usr/lib/appimageupdatetool"
+node "$here/repack-asar.cjs" "$asar" "$here/updater.cjs" "$version" "$zsync_url"
 echo "::endgroup::"
 
 echo "::group::Desktop entry and icon"
@@ -119,7 +104,7 @@ sed -i "0,/^\[Desktop Entry\]/s//[Desktop Entry]\nX-AppImage-Version=$version/" 
 cat "$desktop"
 echo "::endgroup::"
 
-sed -e "s|@ENTRY@|$entry|" -e "s|@REPO@|$repo|" -e "s|@FILE@|$file|" "$here/AppRun" > "$appdir/AppRun"
+sed -e "s|@ENTRY@|$entry|" -e "s|@ZSYNC_URL@|$zsync_url|" "$here/AppRun" > "$appdir/AppRun"
 chmod +x "$appdir/AppRun"
 
 echo "::group::appimagetool"

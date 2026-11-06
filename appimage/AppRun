@@ -5,25 +5,27 @@ HERE="$(dirname "$(readlink -f "$0")")"
 export APPDIR="${APPDIR:-$HERE}"
 
 # Terminal-side update: ./Claude-Desktop-x86_64.AppImage --appimage-update
+# The release's .zsync names the latest file and its SHA-1; the release server
+# has no range requests, so this downloads the whole file when it changed.
 if [ "${1:-}" = "--appimage-update" ]; then
-  if [ -z "${APPIMAGE:-}" ]; then
-    echo "Not running from an AppImage file; nothing to update." >&2
-    exit 1
-  fi
-  target="$APPIMAGE"
-  (unset APPIMAGE APPDIR ARGV0 OWD; "$HERE/usr/lib/appimageupdatetool/AppRun" -r "$target") && exit 0
-  rm -f "$target.part"
-  # zsync needs multi-range requests, which GitHub's release CDN may refuse.
-  # Fall back to downloading the whole file, checked against the .zsync SHA-1.
-  echo "Delta update failed; downloading the full AppImage instead." >&2
-  base="https://github.com/@REPO@/releases/latest/download/@FILE@"
   set -e
+  target="${APPIMAGE:-}"
+  [ -n "$target" ] || { echo "Not running from an AppImage file; nothing to update." >&2; exit 1; }
+  zsync_url="@ZSYNC_URL@"
   zs="$(mktemp)"
-  curl -fsSL -o "$zs" "$base.zsync"
-  want="$(head -c 4096 "$zs" | tr -d '\r' | sed -n 's/^SHA-1: *//p' | head -n1)"
-  rm -f "$zs"
-  [ -n "$want" ] || { echo "Could not read $base.zsync" >&2; exit 1; }
-  curl -fL --progress-bar -o "$target.download" "$base"
+  trap 'rm -f "$zs"' EXIT
+  curl -fsSL -o "$zs" "$zsync_url"
+  header="$(head -c 4096 "$zs" | tr -d '\r\000')"
+  want="$(printf '%s\n' "$header" | sed -n 's/^SHA-1: *//p' | head -n1)"
+  file="$(printf '%s\n' "$header" | sed -n 's/^URL: *//p' | head -n1)"
+  [ -n "$want" ] && [ -n "$file" ] || { echo "Could not read $zsync_url" >&2; exit 1; }
+  case "$file" in http://* | https://*) url="$file" ;; *) url="${zsync_url%/*}/$file" ;; esac
+  if [ "$(sha1sum "$target" | cut -d' ' -f1)" = "$want" ]; then
+    echo "Already up to date." >&2
+    exit 0
+  fi
+  echo "Downloading $url" >&2
+  curl -fL --progress-bar -o "$target.download" "$url"
   got="$(sha1sum "$target.download" | cut -d' ' -f1)"
   if [ "$got" != "$want" ]; then
     rm -f "$target.download"

@@ -2,11 +2,13 @@
 // In-app updates for the Claude Desktop AppImage.
 //
 // build.sh packs this file into app.asar and points package.json "main" at it.
-// It adds "Check for Updates…" to the app menu and the tray menu, checks once
-// shortly after start-up (and every few hours), and updates the AppImage in
-// place with the bundled appimageupdatetool (zsync delta download from the
-// GitHub release), falling back to a full download if the delta fails. Then
-// it loads the app's real entry point unchanged.
+// It wires "Check for Updates…" in the app and tray menus to the AppImage
+// release, checks shortly after start-up (and every few hours), and replaces
+// the AppImage file in place. Then it loads the app's real entry point.
+//
+// The release's .zsync file is the update feed: its header has the SHA-1 and
+// file name of the latest AppImage. The release server doesn't serve range
+// requests, so an update is a whole-file download checked against that SHA-1.
 //
 // Environment:
 //   CLAUDE_APPIMAGE_DISABLE_UPDATES=1   no menu items, no checks
@@ -14,7 +16,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const electron = require('electron');
 
@@ -24,17 +26,11 @@ const cfg = pkg.appimageUpdater || {};
 const ITEM_ID = 'appimage-check-for-updates';
 const FIRST_CHECK_MS = 30 * 1000;
 const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
+const UA = 'claude-desktop-appimage-updater';
 
 const APPIMAGE = process.env.APPIMAGE;
-const TOOL = process.env.APPDIR
-  ? path.join(process.env.APPDIR, 'usr', 'lib', 'appimageupdatetool', 'AppRun')
-  : null;
 
-const enabled =
-  !!APPIMAGE &&
-  !!TOOL &&
-  fs.existsSync(TOOL) &&
-  process.env.CLAUDE_APPIMAGE_DISABLE_UPDATES !== '1';
+const enabled = !!APPIMAGE && !!cfg.zsyncUrl && process.env.CLAUDE_APPIMAGE_DISABLE_UPDATES !== '1';
 
 // Straight to fd 2: the app redirects console and process.stderr to its own logger.
 function log(...args) {
@@ -46,24 +42,66 @@ function log(...args) {
   }
 }
 
-function runTool(args) {
-  return new Promise((resolve) => {
-    const env = { ...process.env };
-    // Let the tool's own AppRun work out its location; these describe ours.
-    for (const k of ['APPIMAGE', 'APPDIR', 'ARGV0', 'OWD']) delete env[k];
-    let out = '';
-    let child;
-    try {
-      child = spawn(TOOL, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (err) {
-      resolve({ code: -1, out: String(err) });
-      return;
-    }
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (out += d));
-    child.on('error', (err) => resolve({ code: -1, out: out + String(err) }));
-    child.on('close', (code) => resolve({ code, out }));
+async function get(url) {
+  const res = await electron.net.fetch(url, { headers: { 'User-Agent': UA }, cache: 'no-store' });
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  return res;
+}
+
+// { sha1, url } of the latest AppImage, from the .zsync header.
+async function latest() {
+  const res = await get(cfg.zsyncUrl);
+  const head = Buffer.from(await res.arrayBuffer()).subarray(0, 4096).toString('latin1');
+  const sha1 = (/^SHA-1:\s*([0-9a-f]{40})\s*$/im.exec(head) || [])[1];
+  const file = (/^URL:\s*(\S+)\s*$/im.exec(head) || [])[1];
+  if (!sha1 || !file) throw new Error(`${cfg.zsyncUrl} has no SHA-1 or URL`);
+  return { sha1: sha1.toLowerCase(), url: new URL(file, cfg.zsyncUrl).href };
+}
+
+let ownHash = null; // { key, sha1 } of the AppImage file, so it's hashed once per change
+function sha1File(file) {
+  const st = fs.statSync(file);
+  const key = `${st.size}:${st.mtimeMs}:${st.ino}`;
+  if (ownHash && ownHash.key === key) return Promise.resolve(ownHash.sha1);
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha1');
+    fs.createReadStream(file)
+      .on('data', (d) => h.update(d))
+      .on('error', reject)
+      .on('end', () => {
+        ownHash = { key, sha1: h.digest('hex') };
+        resolve(ownHash.sha1);
+      });
   });
+}
+
+async function download({ sha1, url }) {
+  const tmp = `${APPIMAGE}.download`;
+  const res = await get(url);
+  if (!res.body) throw new Error(`${url}: empty response`);
+  const hash = crypto.createHash('sha1');
+  const fd = fs.openSync(tmp, 'w', 0o755);
+  try {
+    for await (const chunk of res.body) {
+      const buf = Buffer.from(chunk);
+      hash.update(buf);
+      fs.writeSync(fd, buf);
+    }
+  } catch (err) {
+    fs.closeSync(fd);
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+  fs.closeSync(fd);
+  const got = hash.digest('hex');
+  if (got !== sha1) {
+    fs.rmSync(tmp, { force: true });
+    throw new Error(`checksum mismatch (expected ${sha1}, got ${got})`);
+  }
+  fs.chmodSync(tmp, fs.statSync(APPIMAGE).mode & 0o7777 || 0o755);
+  // rename() swaps the file atomically; the running copy keeps its old inode.
+  fs.renameSync(tmp, APPIMAGE);
+  return APPIMAGE;
 }
 
 function tail(text, lines = 12) {
@@ -113,78 +151,20 @@ async function promptRestart() {
   setTimeout(() => app.exit(0), 3000).unref();
 }
 
-// Plain HTTPS download of the whole AppImage from the latest release, checked
-// against the SHA-1 in its .zsync file. Used when the zsync delta download
-// fails (GitHub's release CDN rejects the multi-range requests zsync makes).
-async function fullDownload() {
-  const { net } = electron;
-  const repo = cfg.repo;
-  const file = cfg.file;
-  if (!repo || !file) throw new Error('no release repository configured');
-  const headers = { 'User-Agent': 'claude-desktop-appimage-updater', Accept: 'application/vnd.github+json' };
-  const rel = await net.fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers });
-  if (!rel.ok) throw new Error(`GitHub API: HTTP ${rel.status}`);
-  const assets = (await rel.json()).assets || [];
-  const asset = assets.find((a) => a.name === file);
-  const zsync = assets.find((a) => a.name === `${file}.zsync`);
-  if (!asset || !zsync) throw new Error(`${file} or its .zsync is missing from the latest release`);
-
-  const zs = await net.fetch(zsync.browser_download_url, { headers: { 'User-Agent': headers['User-Agent'] } });
-  if (!zs.ok) throw new Error(`${zsync.name}: HTTP ${zs.status}`);
-  // The header is text up to the first blank line; the rest is binary checksums.
-  const head = Buffer.from(await zs.arrayBuffer()).subarray(0, 4096).toString('latin1');
-  const want = (/^SHA-1:\s*([0-9a-f]{40})/im.exec(head) || [])[1];
-  if (!want) throw new Error(`no SHA-1 in ${zsync.name}`);
-
-  const tmp = `${APPIMAGE}.download`;
-  const res = await net.fetch(asset.browser_download_url, { headers: { 'User-Agent': headers['User-Agent'] } });
-  if (!res.ok || !res.body) throw new Error(`${file}: HTTP ${res.status}`);
-  const hash = require('crypto').createHash('sha1');
-  const fd = fs.openSync(tmp, 'w', 0o755);
-  try {
-    for await (const chunk of res.body) {
-      const buf = Buffer.from(chunk);
-      hash.update(buf);
-      fs.writeSync(fd, buf);
-    }
-  } finally {
-    fs.closeSync(fd);
-  }
-  const got = hash.digest('hex');
-  if (got !== want.toLowerCase()) {
-    fs.rmSync(tmp, { force: true });
-    throw new Error(`checksum mismatch (expected ${want}, got ${got})`);
-  }
-  fs.chmodSync(tmp, fs.statSync(APPIMAGE).mode & 0o7777 || 0o755);
-  // rename() swaps the file atomically; the running copy keeps its old inode.
-  fs.renameSync(tmp, APPIMAGE);
-  return APPIMAGE;
-}
-
-async function installUpdate() {
+async function installUpdate(target) {
   notify('Downloading the Claude update…');
-  const { code, out } = await runTool(['-r', APPIMAGE]);
-  log('zsync update exited with', code, '\n' + tail(out, 40));
-  if (code === 0) {
-    const m = /(?:New file created|Updated existing file):?\s*(.+)\s*$/m.exec(out);
-    installedPath = m && fs.existsSync(m[1].trim()) ? m[1].trim() : APPIMAGE;
-  } else {
-    fs.rmSync(`${APPIMAGE}.part`, { force: true });
-    try {
-      log('falling back to a full download');
-      installedPath = await fullDownload();
-      log('full download installed', installedPath);
-    } catch (err) {
-      log('full download failed:', err);
-      fs.rmSync(`${APPIMAGE}.download`, { force: true });
-      await box({
-        type: 'error',
-        message: 'Update failed',
-        detail: `${err && err.message ? err.message : err}\n\n${tail(out, 6)}`,
-        buttons: ['OK'],
-      });
-      return;
-    }
+  try {
+    installedPath = await download(target);
+    log('installed', installedPath);
+  } catch (err) {
+    log('update failed:', err);
+    await box({
+      type: 'error',
+      message: 'Update failed',
+      detail: String((err && err.message) || err),
+      buttons: ['OK'],
+    });
+    return;
   }
   await promptRestart();
 }
@@ -198,26 +178,30 @@ async function checkForUpdates({ interactive }) {
   if (busy) return;
   busy = true;
   try {
-    const { code, out } = await runTool(['-j', APPIMAGE]);
-    log('check exited with', code);
-    if (code === 0) {
+    let target;
+    let current;
+    try {
+      target = await latest();
+      current = await sha1File(APPIMAGE);
+    } catch (err) {
+      log('check failed:', err);
       if (interactive) {
         await box({
-          type: 'info',
-          message: "You're up to date",
-          detail: cfg.version ? `Claude ${cfg.version} is the latest version.` : 'This is the latest version.',
+          type: 'error',
+          message: "Couldn't check for updates",
+          detail: String((err && err.message) || err),
           buttons: ['OK'],
         });
       }
       return;
     }
-    if (code !== 1) {
-      log('check failed:\n' + tail(out, 40));
+    log('check: have', current, 'latest', target.sha1);
+    if (current === target.sha1) {
       if (interactive) {
         await box({
-          type: 'error',
-          message: "Couldn't check for updates",
-          detail: tail(out) || `appimageupdatetool exited with code ${code}`,
+          type: 'info',
+          message: "You're up to date",
+          detail: cfg.version ? `Claude ${cfg.version} is the latest version.` : 'This is the latest version.',
           buttons: ['OK'],
         });
       }
@@ -237,7 +221,7 @@ async function checkForUpdates({ interactive }) {
       declinedThisSession = true;
       return;
     }
-    await installUpdate();
+    await installUpdate(target);
   } catch (err) {
     log('error:', err);
   } finally {

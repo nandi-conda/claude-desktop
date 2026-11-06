@@ -20,38 +20,39 @@ file inside the `.deb` (see `recipe/menu.jq`).
 
 ## AppImage
 
-`.github/workflows/appimage.yml` also packages each new version as a self-updating
-AppImage and publishes it as a [GitHub release](https://github.com/nandi-conda/claude-desktop/releases/latest)
-(`Claude-Desktop-x86_64.AppImage`, `Claude-Desktop-aarch64.AppImage`, each with a `.zsync`).
+The AppImage builds on the [fileapi forge](https://fileapi.fastapicloud.dev/forge/#nandi.uk/claude-desktop)
+(`nandi.uk/claude-desktop`), not GitHub Actions. `.forge/jobs.toml` runs `ci/appimage.py` on every push
+to `main`: it resolves the newest `.deb` for amd64 and arm64, builds `appimage/Dockerfile` on Depot for
+each arch, and publishes `Claude-Desktop-x86_64.AppImage` and `Claude-Desktop-aarch64.AppImage` (each with
+a `.zsync`) as release `v<version>` on the forge. A version that is already released is skipped; bump
+`appimage/REVISION` to republish it, or press **Run now** on the forge's Deploys tab to pick up a new
+upstream version without a push. The job needs the `DEPOT_TOKEN` and `DEPOT_PROJECT_ID` secrets
+(`just depot-token claude-desktop` in a fileapi checkout sets both).
 
 ```
-curl -fLO https://github.com/nandi-conda/claude-desktop/releases/latest/download/Claude-Desktop-x86_64.AppImage
+curl -fLO https://fileapi.fastapicloud.dev/api/forge/repos/nandi.uk/claude-desktop/releases/latest/assets/Claude-Desktop-x86_64.AppImage
 chmod +x Claude-Desktop-x86_64.AppImage
 ./Claude-Desktop-x86_64.AppImage
 ```
 
-Updates come from the latest release. `gh-releases-zsync` update information is
-embedded, so AppImageLauncher, Gear Lever and `appimageupdatetool` can update it
-too. zsync deltas need multi-range HTTP requests, which GitHub's release CDN
-currently refuses, so the built-in updater falls back to downloading the whole
-AppImage and checks it against the SHA-1 in the `.zsync` file. Inside the app:
+The AppImage updates itself from the latest forge release:
 
-- **Help › Check for Updates…** (the app's own item, which on Linux otherwise
-  just points at apt) and a **Check for Updates…** tray item run the AppImage updater.
-- About 30 seconds after start-up, and every 6 hours, the app checks and offers
-  to update. The new AppImage replaces the old file in place and the app offers
-  to restart into it.
+- **Help › Check for Updates…** (the app's own item, which on Linux otherwise just points at apt) and a
+  **Check for Updates…** tray item run the AppImage updater.
+- About 30 seconds after start-up, and every 6 hours, the app checks and offers to update. The new
+  AppImage replaces the old file in place and the app offers to restart into it.
 - `./Claude-Desktop-x86_64.AppImage --appimage-update` updates from a terminal.
 
-`CLAUDE_APPIMAGE_NO_AUTO_CHECK=1` keeps the menu item but skips background
-checks; `CLAUDE_APPIMAGE_DISABLE_UPDATES=1` turns the updater off.
+The release's `.zsync` file is the update feed: its header carries the latest AppImage's file name and
+SHA-1. The forge doesn't serve range requests, so an update downloads the whole file and checks it
+against that SHA-1. The embedded update information (`zsync|<url>`) lets AppImageLauncher and Gear Lever
+see updates too.
 
-How it works (`appimage/`): `build.sh` unpacks the `.deb` into an AppDir, adds
-`updater.cjs` to `app.asar` as the new entry point (it adds the menu items, then
-loads the app's original `main`), bundles an unpacked `appimageupdatetool`, and
-runs `appimagetool -u`. `chrome-sandbox` is dropped because it can't be setuid in
-an AppImage; `AppRun` adds `--no-sandbox` only where unprivileged user namespaces
-are blocked (for example Ubuntu's AppArmor default), so Chromium's namespace
-sandbox is used elsewhere. The workflow runs daily, on pushes that touch
-`appimage/`, and on demand, and skips versions that already have a release; bump
-`appimage/REVISION` to republish the same upstream version.
+`CLAUDE_APPIMAGE_NO_AUTO_CHECK=1` keeps the menu item but skips background checks;
+`CLAUDE_APPIMAGE_DISABLE_UPDATES=1` turns the updater off.
+
+How it works (`appimage/`): `build.sh` unpacks the `.deb` into an AppDir, adds `updater.cjs` to
+`app.asar` as the new entry point (it wires the menu items, then loads the app's original `main`), and
+runs `appimagetool -u`. `chrome-sandbox` is dropped because it can't be setuid in an AppImage; `AppRun`
+adds `--no-sandbox` only where unprivileged user namespaces are blocked (for example Ubuntu's AppArmor
+default) or when running as root, so Chromium's namespace sandbox is used elsewhere.
